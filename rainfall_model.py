@@ -5,6 +5,8 @@ import xarray as xr
 from pathlib import Path
 from scipy.stats import gamma
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
+from functools import partial
 from time import time
 
 def calculate_transition_matricies(df):
@@ -246,16 +248,16 @@ def produce_timeseries(trans_mat, param_mat):
     
     return timeseries
 
+def produce_timeseries_ensemble_member(i, transition_matricies, parameter_matricies, output_dir):
+    timeseries = produce_timeseries(transition_matricies, parameter_matricies)
+    file_path = output_dir / f"run_{i+1}.csv"
+    timeseries.to_csv(file_path)
+
 def produce_timeseries_ensemble(transition_matricies, parameter_matricies, output_dir, n_runs):
-    with tqdm(range(n_runs), unit="run") as pbar:
-        for i in pbar:
-            start_time = time()
-            
-            timeseries = produce_timeseries(transition_matricies, parameter_matricies)
-            
-            timeseries.to_csv(output_dir / f"run_{i+1}.csv")
-            
-            elapsed_seconds = time() - start_time
-            minutes_per_run = elapsed_seconds / 60
-            
-            pbar.set_postfix({"min/run": f"{minutes_per_run:.2f}"})
+        worker = partial(
+            produce_timeseries_ensemble_member, 
+            transition_matricies=transition_matricies, 
+            parameter_matricies=parameter_matricies, 
+            output_dir=output_dir
+        )
+        process_map(worker, range(n_runs), max_workers=30, chunksize=1)

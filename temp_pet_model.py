@@ -3,6 +3,7 @@ import calendar
 import numpy as np
 import pandas as pd
 import xarray as xr
+import rioxarray
 import geopandas as gpd
 
 from pathlib import Path
@@ -194,6 +195,9 @@ def create_synthetic_temps(baseline_temps:pd.DataFrame) -> pd.DataFrame:
 
     timeseries = timeseries.astype(float)
 
+    output_dir = Path("outputs/shetran_inputs")
+    timeseries.to_csv(output_dir / "temps.csv")
+
     return timeseries
 
 def fit_pet_model() -> tuple[pd.DataFrame, np.poly1d]:
@@ -297,5 +301,8 @@ def create_synthetic_pet(baseline_pet: pd.DataFrame, synthetic_temps: pd.DataFra
     final_pet = uplifts.add(observed_baseline, axis=0).clip(lower=0)
 
     final_pet["Baseline"] = observed_baseline
+
+    output_dir = Path("outputs/shetran_inputs")
+    final_pet.astype(float).to_csv(output_dir / "pet.csv")
 
     return final_pet.astype(float)
