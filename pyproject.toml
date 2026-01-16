@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "argparse>=1.4.0",
+    "geopandas>=1.1.2",
     "pandas>=2.3.3",
     "pywr>=1.29.0",
     "scipy>=1.17.0",
