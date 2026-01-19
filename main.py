@@ -36,7 +36,7 @@ def main():
         _, pet_model = fit_pet_model()
         _ = create_synthetic_pet(baseline_pet, synthetic_temps, pet_model)
     elif args.shetran:
-        pass
+        shetran_runner()
     elif args.resource:
         pass
     else:

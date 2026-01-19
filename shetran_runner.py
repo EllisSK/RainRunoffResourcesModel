@@ -2,10 +2,15 @@ import time
 import subprocess
 import csv
 import datetime
+import re
+import shutil
+
+import pandas as pd
 
 from pathlib import Path
 from multiprocessing import cpu_count, Manager
-from multiprocessing.pool import ThreadPool
+from tqdm import tqdm
+from tqdm.contrib.concurrent import thread_map
 
 def log_completion(rundata_path, lock):
     COMPLETED_LOG = Path("completed.csv")
@@ -44,6 +49,8 @@ def get_processed_runs():
             for row in reader:
                 if row:
                     processed.add(row[0])
+
+    return processed
 
 def run_shetran(exe_path: Path, rundata_path: Path, lock):
     """
@@ -155,11 +162,59 @@ def run_preprocessor(prep_exe_path: Path, xml_file_path: Path):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
+def create_pet_file(run_dir: Path, scenario: str):
+    df = pd.read_csv(Path("outputs/shetran_inputs/pet.csv"))
+    pet = df[scenario]
+    output_path = run_dir / "28001_PET.csv"
+    pet.to_csv(output_path, header=["Average PET current climate (mm/day)"], index=False)
+
+def create_temp_file(run_dir: Path, scenario: str):
+    df = pd.read_csv(Path("outputs/shetran_inputs/temps.csv"))
+    temps = df[scenario]
+    output_path = run_dir / "28001_Temp.csv"
+    temps.to_csv(output_path, header=["average daily temperature "], index=False)        
+
+def run_sort_helper(path):
+    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', path.name)]
+
 def shetran_runner():
+    COMPLETED_LOG = Path("completed.csv")
+    ERROR_LOG = Path("errors.csv")
+
     shetran_model_dir = Path("data/shetran")
     shetran_ensemble_dir = Path("outputs/shetran").resolve()
+    rainfall_ensemble_dir = Path("outputs/rainfall_ensemble")
+
+    scenarios = [
+                "Baseline",
+                "RCP2.6_10th",
+                "RCP2.6_50th",
+                "RCP2.6_90th",
+                "RCP4.5_10th",
+                "RCP4.5_50th",
+                "RCP4.5_90th",
+                "RCP6.0_10th",
+                "RCP6.0_50th",
+                "RCP6.0_90th",
+                "RCP8.5_10th",
+                "RCP8.5_50th",
+                "RCP8.5_90th"
+    ]
+
+    for item in rainfall_ensemble_dir.iterdir():
+        rainfall = pd.read_csv(item)
+        dir_name = item.stem
+        outer_directory =shetran_ensemble_dir / dir_name
+        outer_directory.mkdir(exist_ok=True)
+        for scenario in scenarios:
+            inner_directory = outer_directory / scenario
+            inner_directory.mkdir(exist_ok=True)
+            shutil.copytree(shetran_model_dir, inner_directory, dirs_exist_ok=True)
+            create_pet_file(inner_directory, scenario)
+            create_temp_file(inner_directory, scenario)
+            rain = rainfall[scenario]
+            rain.to_csv(inner_directory / "28001_Rainfall_sim.csv", header=["1"], index=False)
     
-    # --- Setup CSV files if they don't exist ---
     if not COMPLETED_LOG.exists():
         with open(COMPLETED_LOG, "w", newline='') as f:
             csv.writer(f).writerow(["Rundata Path", "Timestamp"])
@@ -168,7 +223,6 @@ def shetran_runner():
         with open(ERROR_LOG, "w", newline='') as f:
             csv.writer(f).writerow(["Rundata Path", "Error Reason", "Timestamp"])
 
-    # --- Load History for Resuming ---
     print("Loading previous run history...")
     processed_runs = get_processed_runs()
     print(f"Found {len(processed_runs)} previously processed runs (completed or failed).")
@@ -183,49 +237,46 @@ def shetran_runner():
     pre_processor_args = []
     shetran_args = []
 
-    # Use a Manager logic to handle the lock across threads/processes safely
     manager = Manager()
     csv_lock = manager.Lock()
 
     print("Scanning directories for new runs...")
-    
-    for directory in shetran_ensemble_dir.iterdir():
-        if directory.is_dir():
-            for subdirectory in scenarios:
-                full_path = directory / subdirectory
-                
-                rundata_file = full_path / "rundata_28001.txt"
-                
-                # --- RESUME CHECK ---
-                # We convert to string to match how they are stored in the CSV
-                if str(rundata_file) in processed_runs:
-                    continue # Skip this run as it is already in completed.csv or errors.csv
 
-                # Uncomment and adjust paths as needed
-                pre_processor_args.append((Path("C:/Users/ellis/Documents/Shetran2/shetran-prepare-2.2.9-snow.exe"), full_path / "LibraryFile460.xml"))
-                
-                shetran_args.append((
-                    Path("C:/Users/ellis/Documents/Shetran2/sv4.4.5x64.exe"), 
-                    rundata_file,
-                    csv_lock  # Pass the lock to the function
-                ))
+    all_directories = [d for d in shetran_ensemble_dir.iterdir() if d.is_dir()]
+    sorted_directories = sorted(all_directories, key=run_sort_helper)
+    
+    for directory in sorted_directories:
+        for subdirectory in scenarios:
+            full_path = directory / subdirectory
+            
+            rundata_file = full_path / "rundata_28001.txt"
+
+            if str(rundata_file) in processed_runs:
+                continue
+
+            pre_processor_args.append((Path("C:/Users/ellis/Documents/Shetran2/shetran-prepare-2.2.9-snow.exe"), full_path / "LibraryFile460.xml"))
+            
+            shetran_args.append((
+                Path("C:/Users/ellis/Documents/Shetran2/sv4.4.5x64.exe"), 
+                rundata_file,
+                csv_lock
+            ))
 
     print(f"Queueing {len(shetran_args)} runs.")
 
     # Phase 1: Pre-processor
     print("--- Starting Pre-processor Phase ---")
-    for args in pre_processor_args:
+    for args in tqdm(pre_processor_args, desc="Pre-processing"):
         run_preprocessor(*args)
-
     # Phase 2: Main Simulation
     if shetran_args:
         print("--- Starting SHETRAN Simulation Phase (Parallel) ---")
-        pool_sim = ThreadPool(processes=cpu_count())
-        try:
-            pool_sim.starmap(run_shetran, shetran_args)
-        finally:
-            pool_sim.close()
-            pool_sim.join()
-            print("--- All runs finished ---")
+        thread_map(
+            lambda p: run_shetran(*p), 
+            shetran_args, 
+            max_workers=cpu_count(), 
+            desc="Simulations"
+        )
+        print("--- All runs finished ---")
     else:
         print("No new runs to process.")

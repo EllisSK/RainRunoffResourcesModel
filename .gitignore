@@ -12,3 +12,5 @@ wheels/
 # Other
 data/
 outputs/
+completed.csv
+errors.csv
