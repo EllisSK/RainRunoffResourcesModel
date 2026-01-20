@@ -1,5 +1,8 @@
+import os
+
 import pandas as pd
 
+from tqdm.contrib.concurrent import process_map
 from pywr.model import Model
 from pywr.nodes import Catchment, Link, Output, Storage, RiverGauge
 from pywr.parameters import DataFrameParameter, MonthlyProfileParameter
@@ -7,7 +10,7 @@ from pywr.recorders import NumpyArrayStorageRecorder
 
 from pathlib import Path
 
-def run_resource_model(flows_path: Path):
+def run_resource_model(flows_path: Path) -> pd.DataFrame:
     flows = pd.read_csv(flows_path)
 
     dates = pd.date_range("2026-12-01", "2099-11-30")
@@ -147,3 +150,43 @@ def run_resource_model(flows_path: Path):
     results["Percentage Full"] = results["Reservoir Volume"] / 463.45
 
     return results
+
+def process_single_scenario(args):
+    run, scenario, output_dir = args
+
+    target_dir = output_dir / run.name
+    os.makedirs(target_dir, exist_ok=True)
+
+    shetran_run = run / scenario
+    
+    results = run_resource_model(shetran_run / "output_28001_discharge_sim_regulartimestep.txt")
+    results.to_csv(target_dir / f"{scenario}.csv")
+
+def run_resource_model_on_shetran_ensemble(ensemble_dir: Path):
+    output_dir = Path("outputs/resource_model")
+
+    scenarios = [
+                "Baseline",
+                "RCP2.6_10th",
+                "RCP2.6_50th",
+                "RCP2.6_90th",
+                "RCP4.5_10th",
+                "RCP4.5_50th",
+                "RCP4.5_90th",
+                "RCP6.0_10th",
+                "RCP6.0_50th",
+                "RCP6.0_90th",
+                "RCP8.5_10th",
+                "RCP8.5_50th",
+                "RCP8.5_90th"
+    ]
+
+    runs = list(ensemble_dir.iterdir())
+
+    tasks = [
+        (run, scenario, output_dir) 
+        for run in runs 
+        for scenario in scenarios
+    ]
+
+    process_map(process_single_scenario, tasks, max_workers=32, chunksize=1)

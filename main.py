@@ -38,7 +38,8 @@ def main():
     elif args.shetran:
         shetran_runner()
     elif args.resource:
-        pass
+        shetran_ensemble_dir = Path("outputs/shetran")
+        run_resource_model_on_shetran_ensemble(shetran_ensemble_dir)
     else:
         "Please provide some arguments."
 
