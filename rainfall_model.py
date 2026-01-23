@@ -232,7 +232,7 @@ def produce_timeseries(trans_mat, param_mat):
 
     for column_name in timeseries.columns:
         if column_name == "Baseline":
-            timeseries["Baseline"] = markov_model(trans_mat, param_mat, f"{START_YEAR}-01-01", f"{END_YEAR}-12-31")
+            timeseries["Baseline"] = markov_model(trans_mat, param_mat, f"{START_YEAR-1}-12-01", f"{END_YEAR}-12-31")
         else:
             scenario = column_name[:6]
             percentile = column_name[-4:-2]

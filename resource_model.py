@@ -6,7 +6,7 @@ from tqdm.contrib.concurrent import process_map
 from pywr.model import Model
 from pywr.nodes import Catchment, Link, Output, Storage, RiverGauge
 from pywr.parameters import DataFrameParameter, MonthlyProfileParameter
-from pywr.recorders import NumpyArrayStorageRecorder
+from pywr.recorders import NumpyArrayStorageRecorder, NumpyArrayNodeRecorder, NumpyArrayParameterRecorder
 
 from pathlib import Path
 
@@ -135,18 +135,35 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
 
     rivergauge.connect(outflow)
 
-    recorder = NumpyArrayStorageRecorder(
+    reservoir_recorder = NumpyArrayStorageRecorder(
         model,
-        storage_reservoir
+        storage_reservoir,
+        name="reservoir_volume"
+    )
+
+    demand_recorder = NumpyArrayParameterRecorder(
+        model,
+        public_demand_profile,
+        name="public_demand"
+    )
+
+    supply_recorder = NumpyArrayNodeRecorder(
+        model,
+        public_demand,
+        name="public_supply"
     )
 
     model.run()
 
-    results = recorder.to_dataframe()
-
+    results = reservoir_recorder.to_dataframe()
     results.columns = ["Reservoir Volume"]
     results.index = results.index.to_timestamp()
 
+    supply_df = supply_recorder.to_dataframe()
+    demand_df = demand_recorder.to_dataframe()
+
+    results["Public Supply"] = supply_df.values
+    results["Public Demand"] = demand_df.values
     results["Percentage Full"] = results["Reservoir Volume"] / 463.45
 
     return results
