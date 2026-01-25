@@ -5,22 +5,24 @@ import pandas as pd
 from tqdm.contrib.concurrent import process_map
 from pywr.model import Model
 from pywr.nodes import Catchment, Link, Output, Storage, RiverGauge
-from pywr.parameters import DataFrameParameter, MonthlyProfileParameter
+from pywr.parameters import DataFrameParameter, MonthlyProfileParameter, ControlCurveIndexParameter, IndexedArrayParameter, AggregatedParameter
 from pywr.recorders import NumpyArrayStorageRecorder, NumpyArrayNodeRecorder, NumpyArrayParameterRecorder
 
 from pathlib import Path
 
-def run_resource_model(flows_path: Path) -> pd.DataFrame:
+def run_resource_model(flows_path: Path, controlled: bool = False) -> pd.DataFrame:
     flows = pd.read_csv(flows_path)
 
     dates = pd.date_range("2026-12-01", "2099-11-30")
     flows.index = dates
 
+    flows = flows.loc["2029-12-01":]
+
     flows["discharge"] = flows["discharge at the outlet - regular timestep   24.00 hours"] * 3600 * 24 / 1000
 
     model = Model()
 
-    model.timestepper.start = pd.Timestamp("2026-12-01")
+    model.timestepper.start = pd.Timestamp("2029-12-01")
     model.timestepper.end = pd.Timestamp("2099-11-30")
     model.timestepper.timestep = 1
 
@@ -68,7 +70,8 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
         model,
         "controlled_release",
         max_flow=120.0,
-        cost=controlled_release_cost_profile
+        cost=controlled_release_cost_profile,
+        position=(41.2212, 40.5896)
     )
 
     nonpublic_demand = Output(
@@ -85,10 +88,56 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
         position= (42.1368, 70.1077)
     )
 
+    storage_reservoir = Storage(
+        model,
+        "storage_reservoir",
+        cost= 0,
+        min_volume= 0.0,
+        max_volume= 46345.0,
+        initial_volume= 46345.0,
+        position= (42.0903, 31.8102)
+    )
+
+    if controlled:
+        control_curve_lower = MonthlyProfileParameter(
+            model,
+            values=[0.5] * 12,
+            name="Control Curve Lower (50%)"
+        )
+        
+        control_curve_middle = MonthlyProfileParameter(
+            model,
+            values=[0.8] * 12,
+            name="Control Curve Middle (80%)"
+        )
+
+        control_curve_index = ControlCurveIndexParameter(
+            model,
+            storage_reservoir,
+            [control_curve_middle, control_curve_lower],
+            name="Control Curve Index"
+        )
+
+        demand_saving_factor = IndexedArrayParameter(
+            model,
+            control_curve_index,
+            [1.0, 0.85, 0.6],
+            name="demand_saving_factor"
+        )
+
+        public_demand_max_flow = AggregatedParameter(
+            model,
+            [public_demand_profile, demand_saving_factor],
+            agg_func="product",
+            name="Restricted Public Demand"
+        )
+    else:
+        public_demand_max_flow = public_demand_profile
+
     public_demand = Output(
         model,
         "public_demand",
-        max_flow= public_demand_profile,
+        max_flow= public_demand_max_flow,
         cost= -10.0,
         position= (32.8008, 49.8205)
     )
@@ -107,16 +156,6 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
         "spill",
         cost= 5000,
         position= (42.9557, 40.5319)
-    )
-
-    storage_reservoir = Storage(
-        model,
-        "storage_reservoir",
-        cost= 0,
-        min_volume= 0.0,
-        max_volume= 46345.0,
-        initial_volume= 46345.0,
-        position= (42.0903, 31.8102)
     )
 
     catchment_1.connect(storage_reservoir)
@@ -143,7 +182,7 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
 
     demand_recorder = NumpyArrayParameterRecorder(
         model,
-        public_demand_profile,
+        public_demand_max_flow,
         name="public_demand"
     )
 
@@ -153,6 +192,19 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
         name="public_supply"
     )
 
+    rivergauge_recorder = NumpyArrayNodeRecorder(
+        model,
+        rivergauge,
+        name="rivergauge_flow"
+    )
+
+    if controlled:
+        index_recorder = NumpyArrayParameterRecorder(
+            model, 
+            control_curve_index, 
+            name="cc_index"
+        )
+
     model.run()
 
     results = reservoir_recorder.to_dataframe()
@@ -161,23 +213,37 @@ def run_resource_model(flows_path: Path) -> pd.DataFrame:
 
     supply_df = supply_recorder.to_dataframe()
     demand_df = demand_recorder.to_dataframe()
+    rivergauge_df = rivergauge_recorder.to_dataframe()
 
     results["Public Supply"] = supply_df.values
     results["Public Demand"] = demand_df.values
     results["Percentage Full"] = results["Reservoir Volume"] / 463.45
+    results["MRF Met"] = rivergauge_df.values >= 50.0
+
+    if controlled:
+        cc_index_df = index_recorder.to_dataframe()
+        results["Control Curve Index"] = cc_index_df.values
+    else:
+        results["Control Curve Index"] = 0
 
     return results
 
 def process_single_scenario(args):
-    run, scenario, output_dir = args
+    run, scenario, output_dir, controlled = args
 
     target_dir = output_dir / run.name
     os.makedirs(target_dir, exist_ok=True)
 
     shetran_run = run / scenario
     
-    results = run_resource_model(shetran_run / "output_28001_discharge_sim_regulartimestep.txt")
-    results.to_csv(target_dir / f"{scenario}.csv")
+    results = run_resource_model(shetran_run / "output_28001_discharge_sim_regulartimestep.txt", controlled=controlled)
+    
+    if controlled:
+        filename = f"{scenario}_cc.csv"
+    else:
+        filename = f"{scenario}.csv"
+
+    results.to_csv(target_dir / filename)
 
 def run_resource_model_on_shetran_ensemble(ensemble_dir: Path):
     output_dir = Path("outputs/resource_model")
@@ -201,9 +267,10 @@ def run_resource_model_on_shetran_ensemble(ensemble_dir: Path):
     runs = list(ensemble_dir.iterdir())
 
     tasks = [
-        (run, scenario, output_dir) 
+        (run, scenario, output_dir, controlled) 
         for run in runs 
         for scenario in scenarios
+        for controlled in [False, True]
     ]
 
     process_map(process_single_scenario, tasks, max_workers=32, chunksize=1)
